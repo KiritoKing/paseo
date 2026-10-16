@@ -633,6 +633,21 @@ Register a declarative attachment source backed by a plugin RPC. Paseo owns the 
 search picker, drafts, selected pill, and submission. The plugin returns complete text snapshots;
 credentials and vendor API calls stay in the daemon handler.
 
+An optional `mentionPrefix` opts a source into the composer's native `@` autocomplete. Paseo trims
+it and requires the plugin ID format: lowercase letters and digits, beginning with a lowercase
+letter, with hyphens allowed. A normal `@` shows a source entry such as `@linear:`; selecting it
+changes the input to `@linear:`. Only that explicit prefix routes the query to this source's search
+RPC, and results appear in the same autocomplete. Selecting a result uses the existing
+`plugin_resource` attachment flow and submits the returned `text` snapshot. Sources without a
+prefix keep their existing attachment behavior. Mentions stay on the composer's host and do not
+fan out searches to other sources or hosts.
+
+Prefixes must be unique within one plugin; duplicate registration fails, and removing a source
+releases its prefix. If different plugins claim the same prefix, the app uses the first source in
+stable plugin catalog order. Plugin authors who depend on mentions should set `requirements.paseo`
+to the minimum client version that supports this feature once it is published; this guide does not
+prescribe a version number. See the [public attachment-source contract](../public-docs/plugins/reference.md#add-a-composer-attachment-source).
+
 ```ts
 // index.server.ts
 import type { PluginServerContext } from "@getpaseo/plugin/server";
