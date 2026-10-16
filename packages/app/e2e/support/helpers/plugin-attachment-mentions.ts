@@ -56,27 +56,22 @@ type MentionPluginClient = Pick<
   | "installDirectoryPlugin"
   | "removePlugin"
   | "disablePlugin"
+  | "enablePlugin"
   | "invokePluginRpc"
   | "fetchAgentTimeline"
 >;
 
-export async function installAttachmentMentions() {
+export async function installAttachmentMentionPlugin() {
   const directory = await mkdtemp(path.join(tmpdir(), "paseo-attachment-mentions-"));
   const client = await connectDaemonClient<MentionPluginClient>({
     clientIdPrefix: "attachment-mentions",
   });
   const previous = await client.getDaemonConfig();
-  const agent = await seedMockAgentWorkspace({
-    repoPrefix: "attachment-mentions-",
-    title: "Mention plugin resources",
-    repo: { files: [{ path: "README.md", content: "Workspace file suggestions still work.\n" }] },
-  });
   let installed = false;
   async function close() {
     if (installed) await client.removePlugin(id);
     await client.patchDaemonConfig({ pluginsEnabled: previous.config.pluginsEnabled });
     await client.close();
-    await agent.cleanup();
     await rm(directory, { recursive: true, force: true });
   }
   try {
@@ -97,12 +92,34 @@ export async function installAttachmentMentions() {
     throw error;
   }
   return {
-    agent,
     client,
     close,
     async inspect() {
       return inspectionSchema.parse(await client.invokePluginRpc(id, "sessions.inspect", {}));
     },
     disable: () => client.disablePlugin(id),
+    enable: () => client.enablePlugin(id),
   };
+}
+
+export async function installAttachmentMentions() {
+  const agent = await seedMockAgentWorkspace({
+    repoPrefix: "attachment-mentions-",
+    title: "Mention plugin resources",
+    repo: { files: [{ path: "README.md", content: "Workspace file suggestions still work.\n" }] },
+  });
+  try {
+    const plugin = await installAttachmentMentionPlugin();
+    return {
+      ...plugin,
+      agent,
+      async close() {
+        await plugin.close();
+        await agent.cleanup();
+      },
+    };
+  } catch (error) {
+    await agent.cleanup();
+    throw error;
+  }
 }

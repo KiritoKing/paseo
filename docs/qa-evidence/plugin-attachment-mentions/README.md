@@ -15,6 +15,8 @@ content or model API calls. The fixture and assertions are in
   [selected snapshot](mention-attached-compact.png)
 - [New Agent draft](mention-new-agent-draft.png)
 - [Search error](mention-error.png)
+- Review regressions: [pending file lookup](review-pending-lookup.webm),
+  [no project selected](review-no-project.webm), and [failed file lookup](review-file-error.webm)
 
 The recordings exercise the real composer: find a workspace file, discover `@sessions:`, accept
 the source with Tab, search `budget`, accept the result with Tab, repeat the selection without
@@ -22,6 +24,12 @@ duplicating the pill, and send. Assertions check the exact outgoing text attachm
 resource metadata, then read back the daemon's canonical user message. Discovery makes no plugin
 RPC requests. Separate browser assertions cover empty/error states, recovery, a delayed stale
 response, plugin disablement, a New Agent draft, and the existing slash-command caret behavior.
+
+Review regression checks hold a real directory response and pause the browser clock before the
+debounce. Enter and Tab keep the draft unchanged in both states, do not select a stale file, and
+do not send a message; acceptance resumes after the current response is released. A plugin-only
+fixture exercises source search without creating a project. A controlled file transport error
+remains visible when no source matches, but does not hide a valid plugin source.
 
 Tested: Chromium on macOS, at 1280 × 720 and 390 × 844 browser viewports. Compact browser coverage
 does not establish native mobile behavior. Native iOS/Android, the Electron shell, Linux, Windows,
@@ -36,8 +44,9 @@ Focused Vitest runs passed:
 - SDK boundaries, client host helpers, server plugin internal seam, and prompt attachments:
   67 tests across 4 files.
 - Existing file-mention parsing: 14 tests.
+- Loading-state keyboard acceptance (`use-autocomplete.test.tsx`): 3 tests.
 
-Focused browser runs passed all 6 selected scenarios. To reproduce the mention scenarios and
+The review follow-up browser run passed all 9 selected scenarios. To reproduce the mention scenarios and
 the existing slash-command smoke check together:
 
 ```sh

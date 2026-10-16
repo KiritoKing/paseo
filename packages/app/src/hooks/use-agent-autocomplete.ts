@@ -122,6 +122,19 @@ interface DirectorySuggestionEntry {
   kind: "file" | "directory";
 }
 
+function selectWorkspaceMention(input: {
+  text: string;
+  mention: FileMentionRange | null;
+  option: Extract<AgentAutocompleteOption, { type: "workspace_entry" }>;
+}): string | null {
+  if (!input.mention || input.mention.query !== input.option.mention.query) return null;
+  return applyFileMentionReplacement({
+    text: input.text,
+    mention: input.mention,
+    relativePath: input.option.entryPath,
+  });
+}
+
 function currentFileSuggestions(input: {
   data: DirectorySuggestionEntry[] | undefined;
   query: string;
@@ -320,17 +333,20 @@ function resolveCanLoadCommands(args: {
 function resolveAutocompleteIsLoading(args: {
   mode: AutocompleteMode;
   isCommandsLoading: boolean;
-  fileSuggestionsIsPending: boolean;
-  fileSuggestionsIsLoading: boolean;
+  fileLookupEnabled: boolean;
+  fileQuery: string;
+  fileRequestQuery: string;
+  fileSuggestionsFetching: boolean;
   optionsLength: number;
 }): boolean {
   if (args.mode === "command") {
     return args.isCommandsLoading && args.optionsLength === 0;
   }
   if (args.mode === "file") {
-    return (
-      (args.fileSuggestionsIsPending || args.fileSuggestionsIsLoading) && args.optionsLength === 0
-    );
+    const lookupPending =
+      args.fileLookupEnabled &&
+      (args.fileQuery !== args.fileRequestQuery || args.fileSuggestionsFetching);
+    return lookupPending && args.optionsLength === 0;
   }
   return false;
 }
@@ -370,9 +386,11 @@ function resolveDraftCommandContext(draft: DraftCommandTarget | undefined) {
 function resolveAutocompleteEmptyText(args: {
   mode: AutocompleteMode;
   draft: DraftCommandTarget | undefined;
+  autocompleteCwd: string;
   t: TFunction;
 }): string {
   if (args.mode === "file") {
+    if (!args.autocompleteCwd) return args.t("common.empty.noResults");
     return args.t("agentAutocomplete.noFiles");
   }
   if (args.draft?.status === "needs-project") {
@@ -387,12 +405,13 @@ function resolveAutocompleteEmptyText(args: {
 function resolveAutocompletePresentation(input: {
   mode: AutocompleteMode;
   draft: DraftCommandTarget | undefined;
+  autocompleteCwd: string;
   t: TFunction;
   builtInLoading: boolean;
   builtInError: string | undefined;
   plugin: Pick<
     ReturnType<typeof usePluginAttachmentMentions>,
-    "scoped" | "isLoading" | "errorMessage"
+    "scoped" | "isLoading" | "errorMessage" | "options"
   >;
 }) {
   if (input.plugin.scoped) {
@@ -407,9 +426,10 @@ function resolveAutocompletePresentation(input: {
     input.mode === "file"
       ? input.t("agentAutocomplete.searchingWorkspace")
       : input.t("agentAutocomplete.loadingCommands");
+  const hasPluginSources = input.mode === "file" && input.plugin.options.length > 0;
   return {
     isLoading: input.builtInLoading,
-    errorMessage: input.builtInError,
+    errorMessage: hasPluginSources ? undefined : input.builtInError,
     loadingText,
     emptyText: resolveAutocompleteEmptyText(input),
   };
@@ -504,6 +524,13 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
 
   const isVisible = canShowAutocomplete && !(mode === "command" && isCommandsLoading);
 
+  const fileSuggestionsEnabled =
+    mode === "file" &&
+    !pluginMentions.scoped &&
+    Boolean(serverId) &&
+    autocompleteCwd.length > 0 &&
+    Boolean(client) &&
+    isConnected;
   const fileSuggestionsQuery = useQuery({
     queryKey: [
       "directorySuggestions",
@@ -529,13 +556,7 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
       }
       return mapDirectorySuggestionsToEntries(response);
     },
-    enabled:
-      mode === "file" &&
-      !pluginMentions.scoped &&
-      Boolean(serverId) &&
-      autocompleteCwd.length > 0 &&
-      Boolean(client) &&
-      isConnected,
+    enabled: fileSuggestionsEnabled,
     retry: false,
     staleTime: 15_000,
     placeholderData: keepPreviousData,
@@ -636,12 +657,12 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
         return;
       }
 
-      if (!current.fileMention) return;
-      const nextInput = applyFileMentionReplacement({
+      const nextInput = selectWorkspaceMention({
         text: current.text,
         mention: current.fileMention,
-        relativePath: selected.entryPath,
+        option: selected,
       });
+      if (nextInput === null) return;
       setUserInput(nextInput);
       onAutocompleteApplied?.();
     },
@@ -665,22 +686,13 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
     [onSelectOption],
   );
 
-  const { selectedIndex, onKeyPress } = useAutocomplete({
-    isVisible,
-    options,
-    query: mode === "command" ? commandFilterQuery : fileFilterQuery,
-    onSelectOption: selectOptionFromKeyPress,
-    onEscape:
-      mode === "command" && activeSlashCommand?.position === "start"
-        ? () => setUserInput("")
-        : undefined,
-  });
-
   const builtInLoading = resolveAutocompleteIsLoading({
     mode,
     isCommandsLoading,
-    fileSuggestionsIsPending: fileSuggestionsQuery.isPending,
-    fileSuggestionsIsLoading: fileSuggestionsQuery.isLoading,
+    fileLookupEnabled: fileSuggestionsEnabled,
+    fileQuery: fileFilterQuery,
+    fileRequestQuery: debouncedFileFilterQuery,
+    fileSuggestionsFetching: fileSuggestionsQuery.isFetching,
     optionsLength: options.length,
   });
   const builtInError = resolveAutocompleteErrorMessage({
@@ -694,11 +706,54 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
   const presentation = resolveAutocompletePresentation({
     mode,
     draft,
+    autocompleteCwd,
     t,
     builtInLoading,
     builtInError,
     plugin: pluginMentions,
   });
+
+  const { selectedIndex, onKeyPress: onAutocompleteKeyPress } = useAutocomplete({
+    isVisible,
+    isLoading: presentation.isLoading,
+    options,
+    query: mode === "command" ? commandFilterQuery : fileFilterQuery,
+    onSelectOption: selectOptionFromKeyPress,
+    onEscape:
+      mode === "command" && activeSlashCommand?.position === "start"
+        ? () => setUserInput("")
+        : undefined,
+  });
+
+  const onKeyPress = useCallback(
+    (event: AgentAutocompleteKeyPressEvent) => {
+      if (event.key !== "Enter" && event.key !== "Tab") return onAutocompleteKeyPress(event);
+      const mention = findActiveFileMention({
+        text: event.input.text,
+        cursorIndex: event.input.selection.start,
+      });
+      const canShowMentions = resolveAutocompleteIsVisible({
+        mode: "file",
+        canLoadCommands,
+        serverId,
+        autocompleteCwd,
+        hasAttachmentMentions: pluginMentions.hasSources,
+      });
+      if (canShowMentions && mention && mention.query !== activeFileMention?.query) {
+        event.preventDefault();
+        return true;
+      }
+      return onAutocompleteKeyPress(event);
+    },
+    [
+      onAutocompleteKeyPress,
+      activeFileMention,
+      canLoadCommands,
+      serverId,
+      autocompleteCwd,
+      pluginMentions.hasSources,
+    ],
+  );
 
   return {
     isVisible,

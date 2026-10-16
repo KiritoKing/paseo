@@ -18,10 +18,114 @@ import {
 import { expectNewWorkspaceProjectSelected } from "../support/helpers/new-workspace";
 import {
   installAttachmentMentions,
+  installAttachmentMentionPlugin,
   referenceText,
 } from "../support/helpers/plugin-attachment-mentions";
 import { gateNextAgentMessage } from "../support/helpers/agent-message-gate";
 import { clickNewChat } from "../support/helpers/launcher";
+import { installDaemonWebSocketGate } from "../support/helpers/daemon-websocket-gate";
+import { failDirectorySuggestionRequests } from "../support/helpers/command-center-file-search";
+
+test("plugin attachment mentions show an empty state without a project", async ({ page }) => {
+  const scenario = await installAttachmentMentionPlugin();
+  try {
+    await page.goto("/new");
+    await expectNewWorkspaceProjectSelected(page, "Choose project");
+    const input = composerLocator(page);
+    await input.fill("@unmatched");
+    const popover = page.getByTestId("composer-autocomplete-popover");
+    await expect(popover).toContainText("No results found");
+    await expect(popover).not.toContainText("Searching workspace");
+    expect(await scenario.inspect()).toEqual({ queries: [], completed: [] });
+
+    await input.fill("@ses");
+    await expect(page.getByText("@sessions:", { exact: true })).toBeVisible();
+    await input.press("Tab");
+    await input.pressSequentially("budget");
+    await expect(page.getByText("SESSION-1 Budget planning", { exact: true })).toBeVisible();
+    await input.press("Tab");
+    await expect(page.getByTestId("composer-plugin-resource-attachment-pill")).toContainText(
+      "Budget planning",
+    );
+  } finally {
+    await scenario.close();
+  }
+});
+
+test("plugin attachment mentions remain discoverable after file lookup fails", async ({ page }) => {
+  await failDirectorySuggestionRequests(page);
+  const scenario = await installAttachmentMentions();
+  try {
+    await scenario.disable();
+    await openAgentRoute(page, scenario.agent);
+    await expectComposerVisible(page);
+    const input = composerLocator(page);
+    await input.fill("@ses");
+    const popover = page.getByTestId("composer-autocomplete-popover");
+    await expect(popover).toContainText("Test file search transport failure.");
+
+    await scenario.enable();
+    await expect(popover.getByText("@sessions:", { exact: true })).toBeVisible();
+    await expect(popover).not.toContainText("Test file search transport failure.");
+    await input.press("Tab");
+    await input.pressSequentially("budget");
+    await expect(page.getByText("SESSION-1 Budget planning", { exact: true })).toBeVisible();
+    await input.press("Tab");
+    await expect(page.getByTestId("composer-plugin-resource-attachment-pill")).toContainText(
+      "Budget planning",
+    );
+
+    await input.fill("@unmatched");
+    await expect(popover).toContainText("Test file search transport failure.");
+  } finally {
+    await scenario.close();
+  }
+});
+
+test("plugin attachment mentions do not submit while a file lookup is pending", async ({
+  page,
+}) => {
+  const gate = await installDaemonWebSocketGate(page);
+  const scenario = await installAttachmentMentions();
+  try {
+    await openAgentRoute(page, scenario.agent);
+    await expectComposerVisible(page);
+    const input = composerLocator(page);
+    const popover = page.getByTestId("composer-autocomplete-popover");
+    await input.fill("@README");
+    await expect(popover.getByText("README.md", { exact: true })).toBeVisible();
+
+    const now = Date.now();
+    await page.clock.install({ time: now });
+    await page.clock.pauseAt(now + 1000);
+    gate.holdNextServerMessage("directory_suggestions_response");
+    await input.fill("@READ");
+    await input.press("Enter");
+    await expect(input).toHaveValue("@READ");
+    await input.press("Tab");
+    await expect(input).toBeFocused();
+    await expect(input).toHaveValue("@READ");
+    expect(gate.getClientRequestCount("send_agent_message_request")).toBe(0);
+
+    await page.clock.resume();
+    await gate.waitForHeldServerMessage("directory_suggestions_response");
+    await expect(popover.getByText("README.md", { exact: true })).toHaveCount(0);
+    await input.press("Enter");
+    await expect(input).toHaveValue("@READ");
+    expect(gate.getClientRequestCount("send_agent_message_request")).toBe(0);
+    await input.press("Tab");
+    await expect(input).toBeFocused();
+    await expect(input).toHaveValue("@READ");
+
+    gate.releaseHeldServerMessage("directory_suggestions_response");
+    await expect(popover.getByText("README.md", { exact: true })).toBeVisible();
+    await input.press("Enter");
+    await expect(input).toHaveValue('"README.md"');
+    expect(gate.getClientRequestCount("send_agent_message_request")).toBe(0);
+  } finally {
+    await scenario.close();
+  }
+});
 
 test("plugin attachment sources can be discovered from the native mention menu", async ({
   page,
